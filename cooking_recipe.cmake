@@ -276,7 +276,6 @@ set (dpdk_args
   -Dtests=false
   -Dexamples=
   -Dmbuf_refcnt_atomic=false
-  -Dmax_memseg_lists=8192
   -Ddisable_drivers="net/softnic,net/bonding"
   -Ddisable_libs="jobstats,power,port,table,pipeline,member"
   -Dcpu_instruction_set=${Seastar_DPDK_MACHINE})

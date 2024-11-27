@@ -1,3 +1,4 @@
+#
 # This file is open source software, licensed to you under the terms
 # of the Apache License, Version 2.0 (the "License").  See the NOTICE file
 # distributed with this work for additional information regarding copyright
@@ -19,39 +20,5 @@
 # Copyright (C) 2018 Scylladb, Ltd.
 #
 
-# Logical target for all applications.
-add_custom_target (apps)
-
-macro (seastar_add_app name)
-  set (args ${ARGN})
-
-  cmake_parse_arguments (
-    parsed_args
-    ""
-    ""
-    "SOURCES"
-    ${args})
-
-  set (target app_${name})
-  add_executable (${target} ${parsed_args_SOURCES})
-
-  target_include_directories (${target}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-  target_link_libraries (${target}
-    PRIVATE seastar_private)
-
-  set_target_properties (${target}
-    PROPERTIES
-      OUTPUT_NAME ${name})
-
-  add_dependencies (apps ${target})
-endmacro ()
-
-add_subdirectory (httpd)
-add_subdirectory (io_tester)
-add_subdirectory (rpc_tester)
-add_subdirectory (iotune)
-add_subdirectory (memcached)
-add_subdirectory (seawreck)
-add_subdirectory (tcp_httpd)
+seastar_add_app (tcp_httpd
+  SOURCES tcp_httpd.cc)

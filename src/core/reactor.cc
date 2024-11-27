@@ -74,6 +74,7 @@ module;
 #include <linux/types.h> // for xfs, below
 #include <sys/ioctl.h>
 #include <linux/perf_event.h>
+#include <linux/filter.h> // for SO_ATTACH_REUSEPORT_CBPF
 #include <xfs/linux.h>
 /*
  * With package xfsprogs-devel >= 5.14.1, `fallthrough` has defined to
@@ -295,7 +296,7 @@ future<> reactor::do_connect(pollable_fd_state& pfd, socket_address& sa) {
 future<size_t>
 reactor::do_read(pollable_fd_state& fd, void* buffer, size_t len) {
     return readable(fd).then([this, &fd, buffer, len] () mutable {
-        auto r = fd.fd.read(buffer, len);
+        auto r = fd.fd.recv(buffer, len, 0);
         if (!r) {
             return do_read(fd, buffer, len);
         }
@@ -310,7 +311,7 @@ future<temporary_buffer<char>>
 reactor::do_read_some(pollable_fd_state& fd, internal::buffer_allocator* ba) {
     return fd.readable().then([this, &fd, ba] {
         auto buffer = ba->allocate_buffer();
-        auto r = fd.fd.read(buffer.get_write(), buffer.size());
+        auto r = fd.fd.recv(buffer.get_write(), buffer.size(), 0);
         if (!r) {
             // Speculation failure, try again with real polling this time
             // Note we release the buffer and will reallocate it when poll
@@ -1572,13 +1573,24 @@ reactor::posix_listen(socket_address sa, listen_options opts) {
         throw std::system_error(s.code(), fmt::format("posix_listen failed for address {}", sa));
     }
 
+    if (_reuseport && opts.reuse_port && opts.reuse_port_cbpf && !sa.is_af_unix()){
+        // Assigns incoming connections to SO_REUSEPORT sockets based on the ID of the CPU that handled softirq processing.
+        // CPU 0 -> socket 0, CPU 2 -> socket 2. Note that the socket number is determined by the order in which sockets
+        // are added to the SO_REUSEPORT group.
+        struct sock_filter filter[] = {
+            { BPF_LD | BPF_W | BPF_ABS, 0, 0, (unsigned) SKF_AD_OFF + SKF_AD_CPU },
+            { BPF_RET | BPF_A, 0, 0, 0 }
+        };
+        struct sock_fprog prog = { .len = sizeof(filter) / sizeof(filter[0]), .filter = filter };
+
+        fd.setsockopt(SOL_SOCKET, SO_ATTACH_REUSEPORT_CBPF, &prog, sizeof(prog));
+    }
+
     return pollable_fd(std::move(fd));
 }
 
 bool
 reactor::posix_reuseport_detect() {
-    return false; // FIXME: reuseport currently leads to heavy load imbalance. Until we fix that, just
-                  // disable it unconditionally.
     try {
         file_desc fd = file_desc::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
         fd.setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
@@ -3848,6 +3860,7 @@ thread_local std::unique_ptr<reactor, reactor_deleter> reactor_holder;
 
 thread_local smp_message_queue** smp::_qs;
 thread_local std::thread::id smp::_tmain;
+thread_local std::optional<std::vector<unsigned>> smp::_cpu_to_shard_mapping;
 unsigned smp::count = 0;
 
 void smp::start_all_queues()
@@ -4556,6 +4569,18 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
               _exit(1);
           }
         });
+    }
+
+    // store cpu topology for future lookups
+    if (thread_affinity){
+        // Convert mapping from shard_id->cpu_id to cpu_id->shard_id
+        std::vector<unsigned> cpu_to_shard(smp::count);
+        for(unsigned i = 0; i < smp::count; ++i){
+            cpu_to_shard[allocations[i].cpu_id] = i;
+        }
+        smp::_cpu_to_shard_mapping = std::make_optional(std::move(cpu_to_shard));
+    } else {
+        smp::_cpu_to_shard_mapping = std::nullopt;
     }
 
     init_default_smp_service_group(0);
